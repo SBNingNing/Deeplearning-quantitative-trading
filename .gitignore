@@ -1,1 +1,4 @@
 A股数据/
+outputs/
+__pycache__/
+*.pyc
