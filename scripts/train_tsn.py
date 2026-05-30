@@ -21,6 +21,7 @@ if str(SRC_DIR) not in sys.path:
 from modeling import (  # noqa: E402
     SequenceReturnDataset,
     TemporalSegmentNet,
+    TemporalSegmentGRU,
     attach_codes,
     evaluate_model,
     json_safe,
@@ -41,6 +42,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--rank-weight", type=float, default=0.2)
+    parser.add_argument(
+        "--model-type",
+        choices=["tsn", "tsn_gru"],
+        default="tsn_gru",
+        help="Model architecture: tsn (original) or tsn_gru (with GRU, recommended).",
+    )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return parser.parse_args()
 
@@ -62,12 +69,20 @@ def main() -> int:
 
     input_dim = int(train_data.x.shape[-1])
     device = torch.device(args.device)
-    model = TemporalSegmentNet(
-        input_dim=input_dim,
-        hidden_dim=args.hidden_dim,
-        num_segments=4,
-        dropout=args.dropout,
-    ).to(device)
+    if args.model_type == "tsn_gru":
+        model = TemporalSegmentGRU(
+            input_dim=input_dim,
+            hidden_dim=args.hidden_dim,
+            num_segments=4,
+            dropout=args.dropout,
+        ).to(device)
+    else:
+        model = TemporalSegmentNet(
+            input_dim=input_dim,
+            hidden_dim=args.hidden_dim,
+            num_segments=4,
+            dropout=args.dropout,
+        ).to(device)
     checkpoint_path = Path(args.model_dir) / "tsn_best.pt"
     history = train_regression_model(
         model=model,
@@ -80,7 +95,7 @@ def main() -> int:
         patience=args.patience,
         checkpoint_path=checkpoint_path,
         checkpoint_extra={
-            "model_type": "tsn",
+            "model_type": args.model_type,
             "input_dim": input_dim,
             "hidden_dim": args.hidden_dim,
             "dropout": args.dropout,

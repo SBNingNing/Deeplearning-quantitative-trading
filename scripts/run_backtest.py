@@ -47,6 +47,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Backward-compatible alias for --max-sell.",
     )
+    parser.add_argument("--commission-rate", type=float, default=0.00025, help="Commission rate (default 0.025%%)")
+    parser.add_argument("--stamp-tax-rate", type=float, default=0.001, help="Stamp tax rate on sells (default 0.1%%)")
     return parser.parse_args()
 
 
@@ -67,6 +69,8 @@ def main() -> int:
         max_industry_count=args.max_industry_count,
         volatility_window=args.volatility_window,
         max_daily_volatility=args.max_daily_volatility,
+        commission_rate=args.commission_rate,
+        stamp_tax_rate=args.stamp_tax_rate,
     )
     write_backtest_outputs(args.output_dir, curve, holdings, trades, metrics)
     print(json.dumps(json_safe(asdict(metrics)), ensure_ascii=False, indent=2))

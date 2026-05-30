@@ -108,6 +108,83 @@ class MLPRegressor(nn.Module):
         return self.net(x).squeeze(-1)
 
 
+class LinearRegressor(nn.Module):
+    """Simple linear baseline for ablation studies."""
+
+    def __init__(self, input_dim: int) -> None:
+        super().__init__()
+        self.linear = nn.Linear(input_dim, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear(x).squeeze(-1)
+
+
+class TemporalSegmentGRU(nn.Module):
+    """TSN variant with a GRU layer to capture inter-segment temporal dynamics.
+
+    The Conv1d encoder extracts features from each segment independently.
+    A unidirectional GRU then processes the 4 segment vectors in chronological
+    order, preserving the time structure that AdaptiveAvgPool1d discards.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int = 64,
+        num_segments: int = 4,
+        dropout: float = 0.2,
+    ) -> None:
+        super().__init__()
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+        self.num_segments = num_segments
+        self.encoder = nn.Sequential(
+            nn.Conv1d(input_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.BatchNorm1d(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.AdaptiveAvgPool1d(1),
+        )
+        self.gru = nn.GRU(
+            hidden_dim,
+            hidden_dim,
+            num_layers=1,
+            batch_first=True,
+            dropout=0.0,
+        )
+        self.attention = nn.Linear(hidden_dim, 1)
+        self.head = nn.Sequential(
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 3:
+            raise ValueError(f"Expected [batch, time, features], got shape {tuple(x.shape)}")
+        batch, steps, features = x.shape
+        if features != self.input_dim:
+            raise ValueError(f"Expected {self.input_dim} features, got {features}")
+        if steps % self.num_segments != 0:
+            raise ValueError("Time dimension must be divisible by num_segments")
+
+        segment_length = steps // self.num_segments
+        segments = x.reshape(batch, self.num_segments, segment_length, features)
+        segments = segments.reshape(batch * self.num_segments, segment_length, features)
+        segments = segments.transpose(1, 2)  # [B*S, F, L]
+        encoded = self.encoder(segments).squeeze(-1)  # [B*S, H]
+        encoded = encoded.reshape(batch, self.num_segments, self.hidden_dim)  # [B, S, H]
+
+        # GRU processes segments in chronological order
+        gru_out, _ = self.gru(encoded)  # [B, S, H]
+
+        weights = torch.softmax(self.attention(gru_out).squeeze(-1), dim=1).unsqueeze(-1)
+        pooled = (gru_out * weights).sum(dim=1)  # [B, H]
+        return self.head(pooled).squeeze(-1)
+
+
 def pairwise_rank_loss(
     pred: torch.Tensor,
     target: torch.Tensor,
@@ -219,6 +296,9 @@ def train_regression_model(
     checkpoint_extra: dict,
 ) -> list[dict[str, float]]:
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="max", factor=0.5, patience=3, min_lr=1e-6
+    )
     mse = nn.MSELoss()
     best_score = -math.inf
     best_epoch = 0
@@ -238,6 +318,7 @@ def train_regression_model(
             loss = mse(pred, y) + rank_weight * pairwise_rank_loss(pred, y, trade_date)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             train_loss += float(loss.item()) * int(y.numel())
             train_count += int(y.numel())
@@ -257,6 +338,9 @@ def train_regression_model(
             "valid_ic={valid_daily_ic:.4f} valid_icir={valid_icir:.4f} "
             "valid_dir_acc={valid_direction_accuracy:.4f}".format(**row)
         )
+
+        scheduler_metric = valid_metrics.icir if not math.isnan(valid_metrics.icir) else -valid_metrics.loss
+        scheduler.step(scheduler_metric)
 
         score = valid_metrics.icir
         if math.isnan(score):

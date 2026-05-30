@@ -24,6 +24,10 @@ class BacktestMetrics:
     sharpe: float
     max_drawdown: float
     benchmark_total_return: float
+    win_rate: float
+    profit_loss_ratio: float
+    total_turnover: float
+    total_cost: float
 
 
 def run_score_backtest(
@@ -40,6 +44,8 @@ def run_score_backtest(
     max_industry_count: int = 3,
     volatility_window: int = 20,
     max_daily_volatility: float = 0.08,
+    commission_rate: float = 0.00025,
+    stamp_tax_rate: float = 0.001,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, BacktestMetrics]:
     required = {"trade_date", "ts_code", "score"}
     missing = required - set(predictions.columns)
@@ -83,6 +89,8 @@ def run_score_backtest(
 
     holdings: list[str] = []
     equity = initial_cash
+    total_turnover = 0.0
+    total_cost_amount = 0.0
     curve_rows: list[dict[str, float | int]] = []
     holding_rows: list[dict[str, str | int | float]] = []
     trade_rows: list[dict[str, str | int | float]] = []
@@ -100,6 +108,8 @@ def run_score_backtest(
             volatility_window=volatility_window,
             max_daily_volatility=max_daily_volatility,
         )
+        n_sells = 0
+        n_buys = 0
         if not holdings:
             new_holdings = select_buy_candidates(
                 day_scores=day_scores,
@@ -115,6 +125,7 @@ def run_score_backtest(
                     trade_record(int(trade_date), "buy", code, "initial", row)
                 )
             holdings = new_holdings
+            n_buys = len(new_holdings)
         else:
             holdings, sells, buys = rebalance_holdings(
                 holdings=holdings,
@@ -126,6 +137,8 @@ def run_score_backtest(
                 max_industry_count=max_industry_count,
                 enable_risk_control=enable_risk_control,
             )
+            n_sells = len(sells)
+            n_buys = len(buys)
             daily_by_code = day_scores.set_index("ts_code", drop=False)
             for code in sells:
                 row = daily_by_code.loc[code] if code in daily_by_code.index else None
@@ -141,7 +154,17 @@ def run_score_backtest(
         next_date = date_to_next[int(trade_date)]
         returns = read_forward_returns(root, int(trade_date), next_date, holdings)
         portfolio_return = float(returns["return_1d"].mean()) if not returns.empty else 0.0
-        equity *= 1.0 + portfolio_return
+
+        # Transaction cost: commission on both sides, stamp tax on sells only
+        cost_rate = 0.0
+        if n_sells > 0:
+            cost_rate += (n_sells / max(n_holdings, 1)) * (commission_rate + stamp_tax_rate)
+        if n_buys > 0:
+            cost_rate += (n_buys / max(n_holdings, 1)) * commission_rate
+        total_turnover += (n_sells + n_buys) / max(n_holdings, 1)
+        total_cost_amount += cost_rate * equity
+        net_return = portfolio_return - cost_rate
+        equity *= 1.0 + net_return
 
         if int(trade_date) in market.index and next_date in market.index:
             benchmark_return = float(market.loc[next_date] / market.loc[int(trade_date)] - 1.0)
@@ -152,6 +175,8 @@ def run_score_backtest(
                 "trade_date": int(trade_date),
                 "next_date": int(next_date),
                 "portfolio_return": portfolio_return,
+                "cost_rate": cost_rate,
+                "net_return": net_return,
                 "benchmark_return": benchmark_return,
                 "equity": equity,
             }
@@ -173,7 +198,11 @@ def run_score_backtest(
     curve = pd.DataFrame(curve_rows)
     holdings_frame = pd.DataFrame(holding_rows)
     trades = pd.DataFrame(trade_rows)
-    metrics = compute_backtest_metrics(curve, initial_cash)
+    metrics = compute_backtest_metrics(
+        curve, initial_cash,
+        total_turnover=total_turnover,
+        total_cost=total_cost_amount,
+    )
     return curve, holdings_frame, trades, metrics
 
 
@@ -409,7 +438,12 @@ def read_forward_returns(
     return returns[["ts_code", "return_1d"]]
 
 
-def compute_backtest_metrics(curve: pd.DataFrame, initial_cash: float) -> BacktestMetrics:
+def compute_backtest_metrics(
+    curve: pd.DataFrame,
+    initial_cash: float,
+    total_turnover: float = 0.0,
+    total_cost: float = 0.0,
+) -> BacktestMetrics:
     if curve.empty:
         raise ValueError("Backtest curve is empty")
     returns = curve["portfolio_return"].astype(float)
@@ -425,6 +459,10 @@ def compute_backtest_metrics(curve: pd.DataFrame, initial_cash: float) -> Backte
         benchmark_total = np.nan
     else:
         benchmark_total = float((1.0 + benchmark).prod() - 1.0)
+    win_rate = float((returns > 0).mean()) if len(returns) > 0 else 0.0
+    pos_mean = returns[returns > 0].mean()
+    neg_mean = abs(returns[returns < 0].mean())
+    profit_loss_ratio = float(pos_mean / neg_mean) if neg_mean and neg_mean > 0 else float("nan")
     return BacktestMetrics(
         start_date=int(curve["trade_date"].iloc[0]),
         end_date=int(curve["trade_date"].iloc[-1]),
@@ -434,6 +472,10 @@ def compute_backtest_metrics(curve: pd.DataFrame, initial_cash: float) -> Backte
         sharpe=sharpe,
         max_drawdown=max_drawdown,
         benchmark_total_return=benchmark_total,
+        win_rate=win_rate,
+        profit_loss_ratio=profit_loss_ratio,
+        total_turnover=total_turnover,
+        total_cost=total_cost,
     )
 
 

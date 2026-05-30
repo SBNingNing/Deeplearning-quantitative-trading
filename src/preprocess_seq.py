@@ -14,6 +14,7 @@ from preprocess import (
     RAW_FEATURE_COLUMNS,
     add_base_features,
     add_rolling_features,
+    add_technical_features,
     available_daily_dates,
     build_labels,
     fill_and_standardize_cross_section,
@@ -88,6 +89,13 @@ def build_sequence_dataset(
         label_end_date = trading_dates[idx + 1]
         window_dates = trading_dates[idx - config.window : idx]
 
+        # Build multi-horizon label date map
+        label_end_dates_map: dict[str, int] = {"1d": label_end_date}
+        for horizon, offset in [("3d", 3), ("5d", 5)]:
+            future_idx = idx + offset
+            if future_idx < len(trading_dates):
+                label_end_dates_map[f"{horizon}d"] = trading_dates[future_idx]
+
         pool, _ = build_stock_pool(
             data_dir,
             as_of_date=feature_end_date,
@@ -106,8 +114,18 @@ def build_sequence_dataset(
         if feature_columns is None:
             feature_columns = finalized_feature_columns(sequence_frame)
 
-        labels = build_labels(data_dir, market, trade_date, label_end_date)
+        labels = build_labels(data_dir, market, trade_date, label_end_dates_map)
         label_map = labels.set_index("ts_code")["label_excess_1d"].to_dict()
+        label_map_3d = (
+            labels.set_index("ts_code")["label_excess_3d"].to_dict()
+            if "label_excess_3d" in labels.columns
+            else {}
+        )
+        label_map_5d = (
+            labels.set_index("ts_code")["label_excess_5d"].to_dict()
+            if "label_excess_5d" in labels.columns
+            else {}
+        )
         valid_label_codes = set(labels.dropna(subset=["label_excess_1d"])["ts_code"])
 
         complete_counts = sequence_frame.groupby("ts_code")["trade_date"].nunique()
@@ -133,7 +151,9 @@ def build_sequence_dataset(
             samples.append(
                 {
                     "X": frame[feature_columns].to_numpy(dtype=np.float32),
-                    "y": np.float32(label_map[code]),
+                    "y": np.float32(label_map.get(code, np.nan)),
+                    "y_3d": np.float32(label_map_3d.get(code, np.nan)),
+                    "y_5d": np.float32(label_map_5d.get(code, np.nan)),
                     "trade_date": np.int32(trade_date),
                     "feature_end_date": np.int32(feature_end_date),
                     "label_end_date": np.int32(label_end_date),
@@ -187,6 +207,7 @@ def build_sequence_features_for_date(
     history = history.sort_values(["ts_code", "trade_date"])
     history = add_base_features(history)
     history = add_rolling_features(history)
+    history = add_technical_features(history)
 
     standardized_days: list[pd.DataFrame] = []
     for date in window_dates:
@@ -255,6 +276,8 @@ def pack_samples(samples: list[dict[str, Any]]) -> dict[str, np.ndarray]:
     return {
         "X": np.stack([sample["X"] for sample in samples]).astype(np.float32),
         "y": np.asarray([sample["y"] for sample in samples], dtype=np.float32),
+        "y_3d": np.asarray([sample["y_3d"] for sample in samples], dtype=np.float32),
+        "y_5d": np.asarray([sample["y_5d"] for sample in samples], dtype=np.float32),
         "trade_date": np.asarray([sample["trade_date"] for sample in samples], dtype=np.int32),
         "feature_end_date": np.asarray(
             [sample["feature_end_date"] for sample in samples],

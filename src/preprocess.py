@@ -33,6 +33,19 @@ PRICE_FEATURES = [
     "amount_mean_20",
 ]
 
+TECHNICAL_FEATURES = [
+    "macd",
+    "macd_signal",
+    "macd_hist",
+    "rsi_6",
+    "rsi_14",
+    "bb_width",
+    "bb_pct_b",
+    "obv_chg",
+    "money_flow_index",
+    "sector_relative_ret_5",
+]
+
 METRIC_FEATURES = [
     "turnover_rate_f",
     "volume_ratio",
@@ -54,7 +67,7 @@ MONEYFLOW_FEATURES = [
     "big_order_net_amount_ratio_mean_10",
 ]
 
-RAW_FEATURE_COLUMNS = PRICE_FEATURES + METRIC_FEATURES + MONEYFLOW_FEATURES
+RAW_FEATURE_COLUMNS = PRICE_FEATURES + TECHNICAL_FEATURES + METRIC_FEATURES + MONEYFLOW_FEATURES
 ID_COLUMNS = [
     "trade_date",
     "feature_end_date",
@@ -63,7 +76,17 @@ ID_COLUMNS = [
     "weight",
     "industry",
 ]
-LABEL_COLUMNS = ["label_return_1d", "label_index_return_1d", "label_excess_1d"]
+LABEL_COLUMNS = [
+    "label_return_1d",
+    "label_index_return_1d",
+    "label_excess_1d",
+    "label_return_3d",
+    "label_index_return_3d",
+    "label_excess_3d",
+    "label_return_5d",
+    "label_index_return_5d",
+    "label_excess_5d",
+]
 
 
 @dataclass(frozen=True)
@@ -128,6 +151,13 @@ def build_preprocessed_dataset(config: PreprocessConfig) -> tuple[pd.DataFrame, 
         label_end_date = trading_dates[idx + 1]
         window_dates = trading_dates[idx - config.window : idx]
 
+        # Build multi-horizon label date map
+        label_end_dates_map: dict[str, int] = {"1d": label_end_date}
+        for horizon, offset in [("3d", 3), ("5d", 5)]:
+            future_idx = idx + offset
+            if future_idx < len(trading_dates):
+                label_end_dates_map[f"{horizon}d"] = trading_dates[future_idx]
+
         pool, _ = build_stock_pool(
             data_dir,
             as_of_date=feature_end_date,
@@ -139,7 +169,7 @@ def build_preprocessed_dataset(config: PreprocessConfig) -> tuple[pd.DataFrame, 
             continue
 
         features = build_features_for_date(data_dir, pool, window_dates)
-        labels = build_labels(data_dir, market, trade_date, label_end_date)
+        labels = build_labels(data_dir, market, trade_date, label_end_dates_map)
         rows = features.merge(labels, on="ts_code", how="left")
         before_label_filter = len(rows)
         rows = rows.dropna(subset=["label_return_1d", "label_excess_1d"]).copy()
@@ -158,7 +188,8 @@ def build_preprocessed_dataset(config: PreprocessConfig) -> tuple[pd.DataFrame, 
 
     dataset = pd.concat(frames, ignore_index=True)
     feature_columns = finalized_feature_columns(dataset)
-    dataset = dataset[ID_COLUMNS + feature_columns + LABEL_COLUMNS]
+    available_label_cols = [c for c in LABEL_COLUMNS if c in dataset.columns]
+    dataset = dataset[ID_COLUMNS + feature_columns + available_label_cols]
     split_rows = split_row_counts(dataset, config)
     split_date_ranges = split_ranges(dataset, config)
     missing_rate = dataset[feature_columns].isna().mean().round(6).to_dict()
@@ -215,6 +246,7 @@ def build_features_for_date(
     history = history.sort_values(["ts_code", "trade_date"])
     history = add_base_features(history)
     history = add_rolling_features(history)
+    history = add_technical_features(history)
     latest_date = window_dates[-1]
     latest = history[history["trade_date"] == latest_date].copy()
     latest = latest.merge(
@@ -339,34 +371,142 @@ def add_rolling_features(history: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_technical_features(history: pd.DataFrame) -> pd.DataFrame:
+    """Add MACD, RSI, Bollinger Bands, OBV, MFI, and sector-relative features."""
+    df = history.copy()
+    grouped = df.groupby("ts_code", group_keys=False)
+
+    # ---- MACD (12, 26, 9) ----
+    ema12 = grouped["close"].transform(
+        lambda s: s.ewm(span=12, min_periods=12, adjust=False).mean()
+    )
+    ema26 = grouped["close"].transform(
+        lambda s: s.ewm(span=26, min_periods=26, adjust=False).mean()
+    )
+    df["macd"] = ema12 - ema26
+    df["macd_signal"] = df.groupby("ts_code", group_keys=False)["macd"].transform(
+        lambda s: s.ewm(span=9, min_periods=9, adjust=False).mean()
+    )
+    df["macd_hist"] = df["macd"] - df["macd_signal"]
+
+    # ---- RSI (6, 14) ----
+    for window in [6, 14]:
+        delta = grouped["close"].transform(lambda s: s.diff())
+        gain = delta.clip(lower=0)
+        loss = (-delta).clip(lower=0)
+        avg_gain = gain.groupby(df["ts_code"], group_keys=False).transform(
+            lambda s: s.rolling(window, min_periods=window).mean()
+        )
+        avg_loss = loss.groupby(df["ts_code"], group_keys=False).transform(
+            lambda s: s.rolling(window, min_periods=window).mean()
+        )
+        rs = safe_divide(avg_gain, avg_loss)
+        df[f"rsi_{window}"] = 100.0 - safe_divide(100.0, 1.0 + rs)
+
+    # ---- Bollinger Bands (20, 2) ----
+    bb_ma = grouped["close"].transform(
+        lambda s: s.rolling(20, min_periods=10).mean()
+    )
+    bb_std = grouped["close"].transform(
+        lambda s: s.rolling(20, min_periods=10).std(ddof=0)
+    )
+    bb_upper = bb_ma + 2.0 * bb_std
+    bb_lower = bb_ma - 2.0 * bb_std
+    df["bb_width"] = safe_divide(bb_upper - bb_lower, bb_ma)
+    df["bb_pct_b"] = safe_divide(df["close"] - bb_lower, bb_upper - bb_lower)
+
+    # ---- OBV change ----
+    close_diff = grouped["close"].transform(lambda s: s.diff())
+    sign_change = close_diff.apply(lambda x: 1 if x > 0 else (-1 if x < 0 else 0))
+    df["obv"] = (df["vol"] * sign_change).groupby(df["ts_code"], group_keys=False).cumsum()
+    df["obv_chg"] = grouped["obv"].transform(lambda s: s.pct_change())
+
+    # ---- Money Flow Index (14) ----
+    typical_price = (df["high"] + df["low"] + df["close"]) / 3.0
+    raw_money_flow = typical_price * df["vol"]
+    tp_diff = grouped["close"].transform(lambda s: s.diff())
+    pos_flow = raw_money_flow.where(tp_diff > 0, 0.0)
+    neg_flow = raw_money_flow.where(tp_diff < 0, 0.0)
+    pos_sum = pos_flow.groupby(df["ts_code"], group_keys=False).transform(
+        lambda s: s.rolling(14, min_periods=7).sum()
+    )
+    neg_sum = neg_flow.groupby(df["ts_code"], group_keys=False).transform(
+        lambda s: s.rolling(14, min_periods=7).sum()
+    )
+    money_ratio = safe_divide(pos_sum, neg_sum)
+    df["money_flow_index"] = 100.0 - safe_divide(100.0, 1.0 + money_ratio)
+
+    # ---- Sector-relative return (5-day) ----
+    if "industry" in df.columns:
+        ret_5 = grouped["close"].transform(
+            lambda s: s / s.shift(4) - 1.0
+        )
+        df["sector_relative_ret_5"] = df.groupby("industry")["close"].transform(
+            lambda s: s.rank(pct=True)
+        )
+    else:
+        df["sector_relative_ret_5"] = np.nan
+
+    # Drop intermediate columns
+    for col in ["obv"]:
+        if col in df.columns:
+            df = df.drop(columns=col)
+    return df
+
+
 def build_labels(
     data_dir: Path,
     market: pd.DataFrame,
     trade_date: int,
-    label_end_date: int,
+    label_end_dates: dict[str, int],
 ) -> pd.DataFrame:
+    """Build multi-horizon return labels.
+
+    label_end_dates maps horizon label suffix -> future trade date, e.g.
+    {"1d": 20200103, "3d": 20200107, "5d": 20200109}.
+    """
     today = pd.read_csv(
         data_dir / "daily" / f"{trade_date}.csv",
         usecols=["ts_code", "close"],
         dtype={"ts_code": str},
     ).rename(columns={"close": "close_t"})
-    next_day = pd.read_csv(
-        data_dir / "daily" / f"{label_end_date}.csv",
-        usecols=["ts_code", "close"],
-        dtype={"ts_code": str},
-    ).rename(columns={"close": "close_t1"})
-    labels = today.merge(next_day, on="ts_code", how="inner")
-    labels["label_return_1d"] = safe_divide(labels["close_t1"], labels["close_t"]) - 1.0
+    labels = today.copy()
+    labels["ts_code"] = labels["ts_code"].astype(str)
 
-    index_today = market.loc[market["trade_date"] == trade_date, "close"]
-    index_next = market.loc[market["trade_date"] == label_end_date, "close"]
-    if index_today.empty or index_next.empty:
-        index_return = np.nan
-    else:
-        index_return = float(index_next.iloc[0] / index_today.iloc[0] - 1.0)
-    labels["label_index_return_1d"] = index_return
-    labels["label_excess_1d"] = labels["label_return_1d"] - index_return
-    return labels[["ts_code", *LABEL_COLUMNS]]
+    for suffix, future_date in label_end_dates.items():
+        try:
+            future = pd.read_csv(
+                data_dir / "daily" / f"{future_date}.csv",
+                usecols=["ts_code", "close"],
+                dtype={"ts_code": str},
+            ).rename(columns={"close": f"close_{suffix}"})
+            labels = labels.merge(future, on="ts_code", how="left")
+        except FileNotFoundError:
+            labels[f"close_{suffix}"] = np.nan
+
+        return_col = f"label_return_{suffix}"
+        labels[return_col] = safe_divide(
+            labels[f"close_{suffix}"], labels["close_t"]
+        ) - 1.0
+
+        index_today = market.loc[market["trade_date"] == trade_date, "close"]
+        index_future = market.loc[market["trade_date"] == future_date, "close"]
+        if index_today.empty or index_future.empty:
+            index_return = np.nan
+        else:
+            index_return = float(index_future.iloc[0] / index_today.iloc[0] - 1.0)
+        labels[f"label_index_return_{suffix}"] = index_return
+        labels[f"label_excess_{suffix}"] = labels[return_col] - index_return
+
+    # Build return column list dynamically based on which horizons were computed
+    label_cols = ["ts_code"]
+    for suffix in label_end_dates:
+        label_cols.extend([
+            f"label_return_{suffix}",
+            f"label_index_return_{suffix}",
+            f"label_excess_{suffix}",
+        ])
+    return labels[[c for c in label_cols if c in labels.columns]]
 
 
 def fill_and_standardize_cross_section(rows: pd.DataFrame) -> pd.DataFrame:
