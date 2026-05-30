@@ -46,6 +46,12 @@ def run_score_backtest(
     max_daily_volatility: float = 0.08,
     commission_rate: float = 0.00025,
     stamp_tax_rate: float = 0.001,
+    weight_method: str = "equal",
+    gmv_volatility_target: float = 0.12,
+    gmv_penalty_lambda: float = 0.01,
+    gmv_cov_window: int = 60,
+    gmv_min_weight: float = 0.05,
+    gmv_max_weight: float = 0.35,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, BacktestMetrics]:
     required = {"trade_date", "ts_code", "score"}
     missing = required - set(predictions.columns)
@@ -88,6 +94,12 @@ def run_score_backtest(
         raise ValueError("No prediction dates have a next trading day")
 
     holdings: list[str] = []
+    latest_weights: dict[str, float] = {}
+    current_cash: float = 1.0
+
+    if weight_method == "gmv":
+        from portfolio import optimize_gmv_with_penalty, apply_volatility_control, compute_covariance_cache
+
     equity = initial_cash
     total_turnover = 0.0
     total_cost_amount = 0.0
@@ -151,20 +163,62 @@ def run_score_backtest(
                     trade_record(int(trade_date), "buy", code, strategy, row)
                 )
 
+        if weight_method == "gmv" and holdings:
+            cov_matrix = compute_covariance_cache(
+                data_dir=root,
+                trading_dates=trading_dates,
+                date_to_index=date_to_index,
+                trade_date=int(trade_date),
+                codes=holdings,
+                window=gmv_cov_window,
+            )
+            prev_w = pd.Series(latest_weights)
+            new_w = optimize_gmv_with_penalty(
+                cov_matrix, 
+                prev_weights=prev_w, 
+                penalty_lambda=gmv_penalty_lambda,
+                min_weight=gmv_min_weight,
+                max_weight=gmv_max_weight,
+            )
+            final_w, daily_cash = apply_volatility_control(
+                new_w, cov_matrix, target_vol=gmv_volatility_target
+            )
+            daily_weights = final_w.to_dict()
+        else:
+            equal_weight = 1.0 / max(len(holdings), 1) if holdings else 0.0
+            daily_weights = {code: equal_weight for code in holdings}
+            daily_cash = 0.0 if holdings else 1.0
+
         next_date = date_to_next[int(trade_date)]
         returns = read_forward_returns(root, int(trade_date), next_date, holdings)
-        portfolio_return = float(returns["return_1d"].mean()) if not returns.empty else 0.0
+        returns_dict = returns.set_index("ts_code")["return_1d"].to_dict() if not returns.empty else {}
 
-        # Transaction cost: commission on both sides, stamp tax on sells only
+        # Transaction cost and exact turnover based on weight change
         cost_rate = 0.0
-        if n_sells > 0:
-            cost_rate += (n_sells / max(n_holdings, 1)) * (commission_rate + stamp_tax_rate)
-        if n_buys > 0:
-            cost_rate += (n_buys / max(n_holdings, 1)) * commission_rate
-        total_turnover += (n_sells + n_buys) / max(n_holdings, 1)
+        daily_turnover = 0.0
+        all_codes = set(daily_weights.keys()) | set(latest_weights.keys())
+        
+        for code in all_codes:
+            old_w = latest_weights.get(code, 0.0)
+            new_w = daily_weights.get(code, 0.0)
+            diff = new_w - old_w
+            if diff > 0:
+                cost_rate += diff * commission_rate
+            elif diff < 0:
+                cost_rate += abs(diff) * (commission_rate + stamp_tax_rate)
+            daily_turnover += abs(diff)
+
+        total_turnover += daily_turnover
         total_cost_amount += cost_rate * equity
+        
+        portfolio_return = daily_cash * 0.0  # Cash returns 0
+        for code in daily_weights:
+            portfolio_return += daily_weights[code] * returns_dict.get(code, 0.0)
+
         net_return = portfolio_return - cost_rate
         equity *= 1.0 + net_return
+        latest_weights = daily_weights.copy()
+        current_cash = daily_cash
 
         if int(trade_date) in market.index and next_date in market.index:
             benchmark_return = float(market.loc[next_date] / market.loc[int(trade_date)] - 1.0)
@@ -181,7 +235,6 @@ def run_score_backtest(
                 "equity": equity,
             }
         )
-        equal_weight = 1.0 / max(len(holdings), 1)
         daily_by_code = day_scores.set_index("ts_code", drop=False)
         for code in holdings:
             row = daily_by_code.loc[code] if code in daily_by_code.index else None
@@ -189,7 +242,7 @@ def run_score_backtest(
                 {
                     "trade_date": int(trade_date),
                     "ts_code": code,
-                    "weight": equal_weight,
+                    "weight": daily_weights.get(code, 0.0),
                     "industry": row["industry"] if row is not None else UNKNOWN_INDUSTRY,
                     "volatility": float(row["volatility"]) if row is not None and pd.notna(row["volatility"]) else np.nan,
                 }
