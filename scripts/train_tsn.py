@@ -105,8 +105,12 @@ def main() -> int:
     Path(args.model_dir).mkdir(parents=True, exist_ok=True)
     pd.DataFrame(history).to_csv(Path(args.model_dir) / "tsn_history.csv", index=False)
 
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint["model_state"])
+    if checkpoint_path.exists():
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state"])
+    else:
+        print("WARNING: No checkpoint saved (all scores NaN). Using untrained model for predictions.")
+        checkpoint = {"model_type": args.model_type, "input_dim": input_dim}
     prediction_dir = Path(args.prediction_dir)
     prediction_dir.mkdir(parents=True, exist_ok=True)
     metrics: dict[str, dict[str, float]] = {}

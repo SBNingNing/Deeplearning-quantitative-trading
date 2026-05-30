@@ -1,6 +1,6 @@
 # Deeplearning-quantitative-trading
 
-本项目用于完成"基于深度学习的股票趋势预测与模拟交易"大作业，实现从股票池选择、数据预处理、TSN+GRU 模型训练、MLP baseline、预测评估、历史回测（含手续费）、交易策略、风控到每日模拟交易建议的完整链路。
+本项目用于完成"基于深度学习的股票趋势预测与模拟交易"大作业，实现从股票池选择、数据预处理、TSN+GRU 模型训练、预测评估、历史回测（含手续费）、交易策略、风控到每日模拟交易建议的完整链路。
 
 ---
 
@@ -39,23 +39,20 @@
 ```text
 src/
   stock_pool.py       # 动态股票池构建（沪深300增强）
-  preprocess.py       # 截面特征预处理（含技术指标），供 MLP baseline 使用
+  preprocess.py       # 特征计算函数（技术指标、标签构造、标准化等）
   preprocess_seq.py   # 时序特征预处理，供 TSN/TSN+GRU 使用
-  modeling.py         # TSN、TSN+GRU、MLP、Linear 模型 + 训练循环 + 评估
+  modeling.py         # TSN、TSN+GRU、Linear 模型 + 训练循环 + 评估
   backtest.py         # 历史回测（含手续费）、交易策略、风控
 
 scripts/
   build_stock_pool.py       # 生成指定日期股票池
-  preprocess_features.py    # 生成表格特征 parquet
   preprocess_sequences.py   # 生成 TSN 序列 npz
   train_tsn.py              # 训练 TSN / TSN+GRU 主模型
-  train_mlp_baseline.py     # 训练 MLP baseline
   run_backtest.py           # 用预测分数做历史回测
-  predict_latest.py         # [新增] 每日盘后生成买卖建议
+  predict_latest.py         # 每日盘后生成买卖建议
 
 tests/
   test_stock_pool.py
-  test_preprocess.py
   test_sequence_preprocess.py
   test_modeling.py
   test_backtest.py
@@ -92,7 +89,11 @@ python scripts/build_stock_pool.py --date 20260527 --output outputs/stock_pool_2
 
 ---
 
-## 2. 特征工程
+## 2. 数据预处理与特征工程
+
+时序特征预处理逻辑在 `src/preprocess_seq.py`，特征计算函数在 `src/preprocess.py`。
+
+输出 `X` 形状为 `[样本数, 20, 特征数]`。
 
 ### 特征体系（共 44 个原始特征）
 
@@ -134,12 +135,11 @@ python scripts/build_stock_pool.py --date 20260527 --output outputs/stock_pool_2
 
 ## 3. 模型架构
 
-### 模型对比矩阵
+### 模型对比
 
 | 模型 | 参数量 | 时序建模 | 用途 |
 |------|--------|---------|------|
-| Linear Regression | ~130 | 无 | 最弱基线，证明非线性必要 |
-| MLP | ~20K | 无 | 深度学习基线 |
+| Linear Regression | ~130 | 无 | 最简基线 |
 | TSN (原版) | ~30K | 段内池化 | 消融实验（验证 GRU 价值） |
 | **TSN+GRU (主模型)** | **~38K** | **段间 GRU** | **主模型** |
 
@@ -227,7 +227,7 @@ Loss = MSE(pred, y) + λ * PairwiseRankLoss(pred, y)
 
 报告中建议展示以下对比：
 - TSN+GRU vs TSN（GRU 消融）
-- TSN+GRU vs MLP（时序建模价值）
+- TSN+GRU vs TSN（GRU 消融验证时序建模价值）
 - TSN+GRU vs 沪深 300 指数（选股 Alpha）
 - 有技术指标 vs 无技术指标（特征消融）
 
@@ -277,12 +277,9 @@ Loss = MSE(pred, y) + λ * PairwiseRankLoss(pred, y)
 ```bash
 # 首次：预处理 + 训练 + 回测
 python scripts/build_stock_pool.py --date 20260527 --output outputs/stock_pool_20260527.csv
-python scripts/preprocess_features.py
 python scripts/preprocess_sequences.py
 python scripts/train_tsn.py --data-dir outputs/preprocessed_seq --model-type tsn_gru
-python scripts/train_mlp_baseline.py --data-dir outputs/preprocessed
 python scripts/run_backtest.py --predictions outputs/predictions/tsn_valid_predictions.csv --output-dir outputs/backtest/tsn_valid
-python scripts/run_backtest.py --predictions outputs/predictions/mlp_valid_predictions.csv --output-dir outputs/backtest/mlp_valid
 
 # 每日模拟交易（6月1日起）
 python scripts/predict_latest.py
@@ -305,7 +302,7 @@ python scripts/predict_latest.py
 3. 模型设计
    3.1 排序学习建模
    3.2 TSN+GRU 架构详述
-   3.3 基线模型（MLP, Linear, TSN 原版）
+   3.3 基线模型（Linear, TSN 原版）
    3.4 训练配置
 4. 实验结果与分析
    4.1 训练收敛情况

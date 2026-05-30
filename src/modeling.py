@@ -27,21 +27,6 @@ class SequenceReturnDataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tens
         return self.x[index], self.y[index], self.trade_date[index]
 
 
-class TabularReturnDataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]):
-    def __init__(self, frame: pd.DataFrame, feature_columns: list[str]) -> None:
-        self.frame = frame.reset_index(drop=True)
-        self.x = torch.from_numpy(self.frame[feature_columns].to_numpy(dtype=np.float32))
-        self.y = torch.from_numpy(self.frame["label_excess_1d"].to_numpy(dtype=np.float32))
-        self.trade_date = torch.from_numpy(self.frame["trade_date"].to_numpy(dtype=np.int64))
-        self.ts_code = self.frame["ts_code"].astype(str).to_numpy()
-
-    def __len__(self) -> int:
-        return int(self.y.shape[0])
-
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return self.x[index], self.y[index], self.trade_date[index]
-
-
 class TemporalSegmentNet(nn.Module):
     def __init__(
         self,
@@ -88,24 +73,6 @@ class TemporalSegmentNet(nn.Module):
         weights = torch.softmax(self.attention(encoded).squeeze(-1), dim=1).unsqueeze(-1)
         pooled = (encoded * weights).sum(dim=1)
         return self.head(pooled).squeeze(-1)
-
-
-class MLPRegressor(nn.Module):
-    def __init__(self, input_dim: int, hidden_dim: int = 128, dropout: float = 0.2) -> None:
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim // 2, 1),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.net(x).squeeze(-1)
 
 
 class LinearRegressor(nn.Module):

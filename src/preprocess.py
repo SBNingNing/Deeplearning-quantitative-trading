@@ -373,6 +373,11 @@ def add_rolling_features(history: pd.DataFrame) -> pd.DataFrame:
 
 def add_technical_features(history: pd.DataFrame) -> pd.DataFrame:
     """Add MACD, RSI, Bollinger Bands, OBV, MFI, and sector-relative features."""
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return _add_technical_features_impl(history)
+
+
+def _add_technical_features_impl(history: pd.DataFrame) -> pd.DataFrame:
     df = history.copy()
     grouped = df.groupby("ts_code", group_keys=False)
 
@@ -513,6 +518,8 @@ def fill_and_standardize_cross_section(rows: pd.DataFrame) -> pd.DataFrame:
     df = rows.copy()
     derived: dict[str, pd.Series | float] = {}
     for column in RAW_FEATURE_COLUMNS:
+        # Replace Inf/-Inf before any processing so they are handled by fill logic
+        df[column] = df[column].replace([np.inf, -np.inf], np.nan)
         missing_col = f"{column}_missing"
         derived[missing_col] = df[column].isna().astype("int8")
         if df[column].notna().any():
