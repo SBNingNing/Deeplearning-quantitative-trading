@@ -302,8 +302,9 @@ def split_sequence_arrays(
     masks = {
         "train": dates <= config.train_end,
         "valid": (dates >= config.valid_start) & (dates <= config.valid_end),
-        "test": dates >= config.test_start,
     }
+    if config.test_start is not None:
+        masks["test"] = dates >= config.test_start
     return {
         name: {key: value[mask] for key, value in arrays.items()}
         for name, mask in masks.items()

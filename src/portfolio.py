@@ -34,7 +34,7 @@ def optimize_gmv_with_penalty(
     actual_max = max(max_weight, 1.0 / n) if n > 0 else max_weight
 
     cov_np = cov_matrix.values
-    prev_w_np = prev_weights.reindex(assets).fillna(0.0).values
+    prev_w_np = prev_weights.reindex(assets).fillna(0.0).infer_objects(copy=False).values
     
     # 初始猜测值为等权
     w0 = np.ones(n) / n

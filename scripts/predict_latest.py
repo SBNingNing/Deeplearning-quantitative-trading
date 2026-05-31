@@ -69,7 +69,7 @@ def load_model(checkpoint_path: str, device: torch.device):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate daily buy/sell recommendations.")
     parser.add_argument("--data-dir", default="A股数据")
-    parser.add_argument("--checkpoint", default="outputs/models/tsn_best.pt")
+    parser.add_argument("--checkpoint", default="outputs/models/tsn_full_best.pt")
     parser.add_argument("--holdings-csv", default="outputs/current_holdings.csv")
     parser.add_argument("--n-holdings", type=int, default=10)
     parser.add_argument("--max-sell", type=int, default=2)

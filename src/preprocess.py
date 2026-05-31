@@ -558,8 +558,10 @@ def split_dataset(dataset: pd.DataFrame, config: PreprocessConfig) -> dict[str, 
         (dataset["trade_date"] >= config.valid_start)
         & (dataset["trade_date"] <= config.valid_end)
     ].copy()
-    test = dataset[dataset["trade_date"] >= config.test_start].copy()
-    return {"train": train, "valid": valid, "test": test}
+    splits = {"train": train, "valid": valid}
+    if config.test_start is not None:
+        splits["test"] = dataset[dataset["trade_date"] >= config.test_start].copy()
+    return splits
 
 
 def split_row_counts(dataset: pd.DataFrame, config: PreprocessConfig) -> dict[str, int]:

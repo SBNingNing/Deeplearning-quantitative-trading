@@ -49,6 +49,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--commission-rate", type=float, default=0.00025, help="Commission rate (default 0.025%%)")
     parser.add_argument("--stamp-tax-rate", type=float, default=0.001, help="Stamp tax rate on sells (default 0.1%%)")
+    parser.add_argument("--weight-method", type=str, choices=["equal", "gmv"], default="equal", help="Weight allocation method.")
+    parser.add_argument("--gmv-volatility-target", type=float, default=0.12, help="Target annualized volatility for GMV.")
+    parser.add_argument("--gmv-penalty-lambda", type=float, default=0.01, help="Turnover penalty lambda for GMV.")
+    parser.add_argument("--gmv-cov-window", type=int, default=60, help="Lookback window for GMV covariance.")
+    parser.add_argument("--gmv-min-weight", type=float, default=0.05, help="Minimum weight for single stock in GMV.")
+    parser.add_argument("--gmv-max-weight", type=float, default=0.35, help="Maximum weight for single stock in GMV.")
     return parser.parse_args()
 
 
@@ -71,6 +77,12 @@ def main() -> int:
         max_daily_volatility=args.max_daily_volatility,
         commission_rate=args.commission_rate,
         stamp_tax_rate=args.stamp_tax_rate,
+        weight_method=args.weight_method,
+        gmv_volatility_target=args.gmv_volatility_target,
+        gmv_penalty_lambda=args.gmv_penalty_lambda,
+        gmv_cov_window=args.gmv_cov_window,
+        gmv_min_weight=args.gmv_min_weight,
+        gmv_max_weight=args.gmv_max_weight,
     )
     write_backtest_outputs(args.output_dir, curve, holdings, trades, metrics)
     print(json.dumps(json_safe(asdict(metrics)), ensure_ascii=False, indent=2))
