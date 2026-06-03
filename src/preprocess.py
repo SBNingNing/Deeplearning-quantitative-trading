@@ -39,11 +39,16 @@ TECHNICAL_FEATURES = [
     "macd_hist",
     "rsi_6",
     "rsi_14",
+    "kdj_k",
+    "kdj_d",
+    "kdj_j",
     "bb_width",
     "bb_pct_b",
+    "atr_14",
     "obv_chg",
     "money_flow_index",
     "sector_relative_ret_5",
+    "turnover_chg",
 ]
 
 METRIC_FEATURES = [
@@ -156,7 +161,7 @@ def build_preprocessed_dataset(config: PreprocessConfig) -> tuple[pd.DataFrame, 
         for horizon, offset in [("3d", 3), ("5d", 5)]:
             future_idx = idx + offset
             if future_idx < len(trading_dates):
-                label_end_dates_map[f"{horizon}d"] = trading_dates[future_idx]
+                label_end_dates_map[horizon] = trading_dates[future_idx]
 
         pool, _ = build_stock_pool(
             data_dir,
@@ -244,6 +249,9 @@ def build_features_for_date(
 
     history = pd.concat(frames, ignore_index=True)
     history = history.sort_values(["ts_code", "trade_date"])
+    # Merge industry BEFORE technical features (needed for sector-relative)
+    industry_map = pool[["ts_code", "industry"]].drop_duplicates("ts_code")
+    history = history.merge(industry_map, on="ts_code", how="left")
     history = add_base_features(history)
     history = add_rolling_features(history)
     history = add_technical_features(history)
@@ -253,7 +261,12 @@ def build_features_for_date(
         pool[["ts_code", "weight", "industry"]],
         on="ts_code",
         how="left",
+        suffixes=("_drop", ""),
     )
+    # Drop any duplicate column from the double merge
+    for col in latest.columns:
+        if col.endswith("_drop"):
+            latest = latest.drop(columns=[col])
     return latest[["ts_code", "weight", "industry", *RAW_FEATURE_COLUMNS]]
 
 
@@ -408,6 +421,30 @@ def _add_technical_features_impl(history: pd.DataFrame) -> pd.DataFrame:
         rs = safe_divide(avg_gain, avg_loss)
         df[f"rsi_{window}"] = 100.0 - safe_divide(100.0, 1.0 + rs)
 
+    # ---- KDJ (9, 3, 3) ----
+    low_9 = grouped["low"].transform(lambda s: s.rolling(9, min_periods=5).min())
+    high_9 = grouped["high"].transform(lambda s: s.rolling(9, min_periods=5).max())
+    rsv = safe_divide(df["close"] - low_9, high_9 - low_9) * 100.0
+    df["kdj_k"] = rsv.groupby(df["ts_code"], group_keys=False).transform(
+        lambda s: s.ewm(com=2, min_periods=5, adjust=False).mean()
+    )
+    df["kdj_d"] = df.groupby("ts_code", group_keys=False)["kdj_k"].transform(
+        lambda s: s.ewm(com=2, min_periods=5, adjust=False).mean()
+    )
+    df["kdj_j"] = 3.0 * df["kdj_k"] - 2.0 * df["kdj_d"]
+
+    # ---- ATR (14) ----
+    prev_close = grouped["close"].transform(lambda s: s.shift(1))
+    tr1 = df["high"] - df["low"]
+    tr2 = (df["high"] - prev_close).abs()
+    tr3 = (df["low"] - prev_close).abs()
+    true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    df["atr_14"] = true_range.groupby(df["ts_code"], group_keys=False).transform(
+        lambda s: s.rolling(14, min_periods=7).mean()
+    )
+    # Normalize by close to make cross-sectional comparable
+    df["atr_14"] = safe_divide(df["atr_14"], df["close"])
+
     # ---- Bollinger Bands (20, 2) ----
     bb_ma = grouped["close"].transform(
         lambda s: s.rolling(20, min_periods=10).mean()
@@ -443,14 +480,19 @@ def _add_technical_features_impl(history: pd.DataFrame) -> pd.DataFrame:
 
     # ---- Sector-relative return (5-day) ----
     if "industry" in df.columns:
-        ret_5 = grouped["close"].transform(
-            lambda s: s / s.shift(4) - 1.0
-        )
-        df["sector_relative_ret_5"] = df.groupby("industry")["close"].transform(
+        df["_ret_5"] = grouped["close"].transform(lambda s: s / s.shift(4) - 1.0)
+        df["sector_relative_ret_5"] = df.groupby("industry")["_ret_5"].transform(
             lambda s: s.rank(pct=True)
         )
+        df = df.drop(columns=["_ret_5"])
     else:
         df["sector_relative_ret_5"] = np.nan
+
+    # ---- Turnover change rate ----
+    if "turnover_rate_f" in df.columns:
+        df["turnover_chg"] = grouped["turnover_rate_f"].transform(
+            lambda s: s / s.rolling(5, min_periods=3).mean() - 1.0
+        )
 
     # Drop intermediate columns
     for col in ["obv"]:
@@ -602,4 +644,3 @@ def safe_divide(numerator: Any, denominator: Any) -> Any:
     if np.isinf(result):
         return np.nan
     return result
-

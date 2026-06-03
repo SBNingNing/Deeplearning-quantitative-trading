@@ -97,6 +97,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-dir", default="outputs/models")
     parser.add_argument("--prediction-dir", default="outputs/predictions")
     parser.add_argument("--hidden-dim", type=int, default=64)
+    parser.add_argument("--num-segments", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.2)
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--epochs", type=int, default=30)
@@ -171,14 +172,14 @@ def main() -> int:
         model = TemporalSegmentGRU(
             input_dim=input_dim,
             hidden_dim=args.hidden_dim,
-            num_segments=4,
+            num_segments=args.num_segments,
             dropout=args.dropout,
         ).to(device)
     else:
         model = TemporalSegmentNet(
             input_dim=input_dim,
             hidden_dim=args.hidden_dim,
-            num_segments=4,
+            num_segments=args.num_segments,
             dropout=args.dropout,
         ).to(device)
 
@@ -197,6 +198,7 @@ def main() -> int:
             "model_type": args.model_type,
             "input_dim": input_dim,
             "hidden_dim": args.hidden_dim,
+            "num_segments": args.num_segments,
             "dropout": args.dropout,
             "feature_columns": feature_columns,
         },

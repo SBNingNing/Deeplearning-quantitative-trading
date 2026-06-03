@@ -94,7 +94,7 @@ def build_sequence_dataset(
         for horizon, offset in [("3d", 3), ("5d", 5)]:
             future_idx = idx + offset
             if future_idx < len(trading_dates):
-                label_end_dates_map[f"{horizon}d"] = trading_dates[future_idx]
+                label_end_dates_map[horizon] = trading_dates[future_idx]
 
         pool, _ = build_stock_pool(
             data_dir,
@@ -205,6 +205,9 @@ def build_sequence_features_for_date(
         return pd.DataFrame()
 
     history = history.sort_values(["ts_code", "trade_date"])
+    # Merge industry BEFORE technical features (needed for sector-relative)
+    industry_map = pool[["ts_code", "industry"]].drop_duplicates("ts_code")
+    history = history.merge(industry_map, on="ts_code", how="left")
     history = add_base_features(history)
     history = add_rolling_features(history)
     history = add_technical_features(history)
@@ -335,4 +338,3 @@ def write_sequence_outputs(
         json.dumps(asdict(summary), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-
